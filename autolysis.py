@@ -1,16 +1,12 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#   "os",
-#   "sys",
 #   "pandas",
 #   "numpy",
-#   "uuid"
-#   "seaborn"
-#   "matplotlib"
-#   "json",
+#   "uuid",
+#   "seaborn",
+#   "matplotlib",
 #   "requests",
-#   "base64"
 # ]
 # ///
 
@@ -25,7 +21,6 @@ import matplotlib.pyplot as plt
 import json
 import requests
 import base64
-import chardet
 
 #Checking the Existence of AIPROXY_TOKEN
 try:
@@ -357,7 +352,7 @@ if __name__ == "__main__":
     bestAnalysis = suggestAnalysis(fileName, columnMetadata)
     print(bestAnalysis)
 
-    directoryName = fileName.rstrip('.csv')
+    directoryName = fileName[:-4]
     for each in bestAnalysis:
         if each["analysis_name"] == 'Outlier Detection':
             detect_outliers_boxplot(df, each["field_list"].split(','), directoryName)
