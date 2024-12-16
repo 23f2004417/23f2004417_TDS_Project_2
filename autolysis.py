@@ -7,6 +7,7 @@
 #   "seaborn",
 #   "matplotlib",
 #   "requests",
+#   "statsmodels"
 # ]
 # ///
 
@@ -16,7 +17,7 @@ import pandas as pd
 import numpy as np
 import uuid
 import seaborn as sns
-# from sklearn.cluster import KMeans
+import statsmodels.api as sm
 import matplotlib.pyplot as plt
 import json
 import requests
@@ -34,19 +35,24 @@ url="https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
 model="gpt-4o-mini"
 headers={"Content-Type":"application/json", "Authorization":f"Bearer {AIPROXY_TOKEN}"}
 
+#Use LLM to extract the Meta Data of the Fields in the .csv file.
 def extractMetadata(fileName):
-    try:
-        with open(file=fileName,mode='r',encoding='utf-8') as f:
-            sampleData = ''.join([f.readline() for i in range(10)])
-    except UnicodeDecodeError:
-        with open(file=fileName,mode='r',encoding='latin1') as f:
-            sampleData = ''.join([f.readline() for i in range(10)])
+    encodingsList = ['utf-8', 'latin1', 'utf-16', 'utf-32', 'iso-8859-1', 'cp1252']
 
-    prompt = "You are given with a sample of a dataset. The first line is the header. The fields may have uncleansed values, Ignore such cells. Based on the majority of the column classify the fields as Integer, Float, Double, Boolean, Strings, etc."
+    for encoding in encodingsList:
+        try:
+            with open(file=fileName, mode='r', encoding=encoding) as f:
+                sampleData = ''.join([f.readline() for i in range(10)])
+            break  # Exit the loop if successful
+        except (UnicodeDecodeError, FileNotFoundError) as e:
+            print(f"Failed to read with encoding {encoding}: {e}")
+            continue
+
+    prompt = f"You are given with a sample of a dataset {fileName}. The first line is the header. The fields may have uncleansed values, Ignore such cells. Based on the majority of the column classify the fields as Integer, Float, Double, Boolean, Strings, Date, Datetime etc."
     functions = [
         {
             "name": "get_field_datatype",
-            "description" : "Identify field names and their data types from the dataset",
+            "description" : f"Identify field names and their data types from the sample dataset {fileName}",
             "parameters" : {
                 "type": "object",
                 "properties": {
@@ -62,7 +68,7 @@ def extractMetadata(fileName):
                                 },
                                 "column_type": {
                                     "type": "string",
-                                    "description": "The Data Type of the Column Integer, Float, Double, Boolean, Strings, etc."
+                                    "description": "The Data Type of the Column Integer, Float, Double, Boolean, Strings, Date, Datetime etc."
                                 }
                             },
                             "required": ["column_name", "column_type"]
@@ -99,9 +105,12 @@ def cleanData(column, column_type):
         return pd.to_numeric(column, errors='coerce')  # Convert to float, coercing errors to NaN
     elif column_type == 'Boolean':
         return column.astype(str).str.lower().replace({'true': True, 'false': False, '1': True, '0': False, '': np.nan}).astype('boolean')  # Convert to boolean
+    elif column_type == 'Date' or column_type == 'Datetime':
+        return pd.to_datetime(column, errors='coerce')  # Convert to datetime, coercing errors to NaT
     else:
         return column  # Return the column unchanged if type is unknown
 
+#Use LLM to get 3 best Analysis that can be performed on the given dataset.
 def suggestAnalysis(fileName, columnMetadata):
     # Prepare header and data rows
     header = [item['column_name'] for item in columnMetadata]
@@ -112,20 +121,22 @@ def suggestAnalysis(fileName, columnMetadata):
     print(header_types_string)
 
     prompt = (
-    "Given the field names and their types"
-    "Suggest 3 best analysis that can be performed on them. (Outlier Detection/Correlation Analysis)"
+    f"Given the field names and their types for {fileName}"
+    "Suggest 3 best analysis that can be performed on them. (Outlier Detection/Correlation Analysis/Regression Analysis/Time Series Analysis). Perform Regression and Time Series Analysis on only 2 fields"
     "Also provide the fields required for the analysis as a list"
+    "For Regression Analysis let the first field name be the dependent variable."
+    "For Time Series Analysis let the first field name be the date field name."
     )
     functions = [
         {
             "name": "suggest_analysis",
-            "description" : "Use field Names and their types to guess the best possible analysis required for the given dataset (Outlier Detection/Correlation Analysis)",
+            "description" : "Use field Names and their types to guess the best possible analysis required for the given dataset (Outlier Detection/Correlation Analysis/Regression Analysis), Perform Regression and Time Series Analysis on only 2 fields, For Regression Analysis let the first field name be the dependent variable, For Time Series Analysis let the first field name be the date field name.",
             "parameters" : {
                 "type": "object",
                 "properties": {
                     "three_best_analysis": {
                         "type": "array",
-                        "description": "3 Best Possible analysis choose only (Outlier Detection/Correlation Analysis)",
+                        "description": "3 Best Possible analysis choose only (Outlier Detection/Correlation Analysis/Regression Analysis/Time Series Analysis), Perform Regression and Time Series Analysis on only 2 fields",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -135,7 +146,7 @@ def suggestAnalysis(fileName, columnMetadata):
                                 },
                                 "field_list": {
                                     "type": "string",
-                                    "description": "The list of all field names required for the analysis in comma seperated"
+                                    "description": "The list of all field names required for the analysis in comma seperated, For Regression Analysis let the first field name be the dependent variable, For Time Series Analysis let the first field name be the date field name."
                                 }
                             },
                             "required": ["analysis_name", "field_list"]
@@ -162,7 +173,7 @@ def suggestAnalysis(fileName, columnMetadata):
     three_best_analysis = json.loads(result.json()['choices'][0]['message']['function_call']['arguments'])['three_best_analysis']
     return three_best_analysis
 
-
+#Function to Detect and Plot Outliers
 def detect_outliers_boxplot(dataframe, field_names, save_directory):
     outliers = {}
     
@@ -223,6 +234,7 @@ def detect_outliers_boxplot(dataframe, field_names, save_directory):
     
     print(f"Outlier Box Plot saved as {output_path}")
 
+#Function to perform Correlation Analysis and Plot Heat Maps
 def correlation_analysis(df, field_names, output_directory):
     # Load the dataset
     data = df
@@ -254,7 +266,91 @@ def correlation_analysis(df, field_names, output_directory):
     plt.savefig(output_path, bbox_inches='tight')
     plt.close()  # Close the plot to free up memory
     print(f"Correlation heatmap saved as {output_path}")
+
+#Function to perform Regression Analysis and Plot graphs
+def regression_analysis(df, field_names, output_directory):
+    # Load the dataset
+    data = df
+    dependent_var = field_names[0]
+    independent_vars = field_names[1:]
+    # Prepare the data for regression
+    X = data[independent_vars]  # Independent variables
+    y = data[dependent_var]      # Dependent variable
+    X = sm.add_constant(X)       # Add a constant term to the predictor
+
+    # Fit the regression model
+    model = sm.OLS(y, X).fit()
+
+    # Print the summary of the regression results
+    print(model.summary())
+
+    # Set up the plot for the first independent variable
+    plt.figure(figsize=(10, 6))
+    plt.scatter(data[independent_vars[0]], y, color='blue', label='Data points')
     
+    # Predict values for the regression line
+    predictions = model.predict(X)
+    plt.plot(data[independent_vars[0]], predictions, color='red', label='Regression line')
+
+    # Labeling the plot
+    plt.title('Regression Analysis', fontsize=16)
+    plt.xlabel(independent_vars[0], fontsize=14)
+    plt.ylabel(dependent_var, fontsize=14)
+    plt.legend()
+
+    # Create the output directory if it doesn't exist
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+
+    # Generate a unique filename using UUID
+    output_filename = f"regression_analysis_{uuid.uuid4()}.png"
+    output_path = os.path.join(output_directory, output_filename)
+
+    # Save the figure
+    plt.savefig(output_path, bbox_inches='tight')
+    plt.close()  # Close the plot to free up memory
+    print(f"Regression plot saved as {output_path}")
+
+#Function to perform Time Series Analysis and Plot graphs
+def time_series_analysis(df, field_names, output_directory):
+    # Extract the datetime and value fields
+    datetime_field = field_names[0]
+    value_field = field_names[1]
+
+    # Ensure the datetime field is in datetime format
+    df[datetime_field] = pd.to_datetime(df[datetime_field])
+
+    # Sort the DataFrame by the datetime field
+    df = df.sort_values(by=datetime_field)
+
+    # Check if the value field is numeric, and convert if necessary
+    df[value_field] = pd.to_numeric(df[value_field], errors='coerce')
+
+    # Drop any rows with NaN values in the datetime or value fields
+    df = df.dropna(subset=[datetime_field, value_field])
+
+    # Generate the time series plot
+    plt.figure(figsize=(12, 6))
+    plt.plot(df[datetime_field], df[value_field], marker='o', linestyle='-')
+    plt.title('Time Series Analysis')
+    plt.xlabel(datetime_field)
+    plt.ylabel(value_field)
+    plt.grid()
+    
+    # Create the output directory if it doesn't exist
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+
+    # Generate a unique filename using UUID for the time series plot
+    time_series_plot_filename = f"time_series_plot_{uuid.uuid4()}.png"
+    time_series_plot_path = os.path.join(output_directory, time_series_plot_filename)
+    
+    # Save the time series plot
+    plt.savefig(time_series_plot_path, bbox_inches='tight')
+    plt.close()  # Close the plot to free up memory
+    print(f"Time series plot saved as {time_series_plot_path}")
+
+#Use LLM to narrate story based on the given details and images. Also, store the content into the README.md file    
 def narrateStory(fileName, columnMetadata):
     # Prepare header and data rows
     header = [item['column_name'] for item in columnMetadata]
@@ -267,7 +363,7 @@ def narrateStory(fileName, columnMetadata):
     # Get the current working directory
     current_directory = os.getcwd()
     # Construct the full path to the folder
-    folder_path = os.path.join(current_directory, fileName)
+    folder_path = os.path.join(current_directory, fileName[:-4])
     # Check if the folder exists
     base64_image = []
     if os.path.isdir(folder_path):
@@ -287,7 +383,7 @@ def narrateStory(fileName, columnMetadata):
                 "content": [
                 {
                     "type": "text",
-                    "text": f"Describe the data briefly, The analysis carried out and insights that was discovered using the provided plots and metadata {header_types_string}",
+                    "text": f"Describe the data {fileName} briefly, The analysis carried out and insights that was discovered using the provided plots and metadata {header_types_string}",
                 },
                 {
                     "type": "image_url",
@@ -317,7 +413,7 @@ def narrateStory(fileName, columnMetadata):
 
     result = requests.post(url=url, headers=headers, json=json_data)
     content = result.json()['choices'][0]['message']['content']
-    print(result)
+    print(result.text)
     return content
 
 # Function to encode the image
@@ -331,15 +427,25 @@ if __name__ == "__main__":
         sys.exit(1)
 
     fileName = sys.argv[1]
-    try:
-        df = pd.read_csv(fileName, encoding='utf-8')
-    except UnicodeDecodeError:
-        # If UTF-8 fails, fall back to Latin-1
-        df = pd.read_csv(fileName, encoding='latin1')
 
+    encodingsList = ['utf-8', 'latin1', 'utf-16', 'utf-32', 'iso-8859-1', 'cp1252']
+    for encoding in encodingsList:
+        try:
+            df = pd.read_csv(fileName, encoding=encoding)
+            break  # Exit the loop if successful
+        except UnicodeDecodeError:
+            print(f"Failed to read with encoding {encoding}. Trying next encoding...")
+        except FileNotFoundError:
+            print(f"The file {fileName} was not found.")
+            break  # Exit if the file doesn't exist
+        except Exception as e:
+            print(f"An error occurred while reading the file: {e}")
+            break  # Exit on any other unexpected error
+    
+    #Get Column Meta Data
     columnMetadata = extractMetadata(fileName)
     print(columnMetadata)
-
+    #Cleaning the file
     for meta in columnMetadata:
         column_name = meta['column_name']
         column_type = meta['column_type']
@@ -348,19 +454,24 @@ if __name__ == "__main__":
     #Dropping Nans
     df.dropna(inplace=True)
     print(df)
-
+    #Get Best Analysis
     bestAnalysis = suggestAnalysis(fileName, columnMetadata)
     print(bestAnalysis)
-
+    #Perform Analysis and Plot them
     directoryName = fileName[:-4]
     for each in bestAnalysis:
         if each["analysis_name"] == 'Outlier Detection':
             detect_outliers_boxplot(df, each["field_list"].split(','), directoryName)
         elif each["analysis_name"] == 'Correlation Analysis':
             correlation_analysis(df, each["field_list"].split(','), directoryName)
+        elif each["analysis_name"] == 'Regression Analysis':
+            regression_analysis(df, each["field_list"].split(','), directoryName)
+        elif each["analysis_name"] == 'Time Series Analysis':
+            time_series_analysis(df, each["field_list"].split(','), directoryName)
         else:
             pass
-    content = narrateStory(directoryName, columnMetadata)
+    #Narrate Story and Write README.md
+    content = narrateStory(fileName, columnMetadata)
     with open(f'{directoryName}/README.md', 'w') as readme_file:
         readme_file.write(content)
     print("README.md file has been created successfully.")
